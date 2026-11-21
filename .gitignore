@@ -1,0 +1,17 @@
+.run/
+node_modules/
+lib/
+*.tgz
+.DS_Store
+
+# Android
+android/build/
+android/.gradle/
+android/.cxx/
+*.iml
+local.properties
+
+# iOS
+ios/build/
+xcuserdata/
+Pods/
