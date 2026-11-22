@@ -232,6 +232,7 @@ On Android, the native side reads the `response` extra. Apps that instead send `
 - **iOS cannot return a result.** `pay()` resolves with `launched` as soon as the app opens. The per-app URLs in `KNOWN_UPI_APPS` are best effort and need checking on a device.
 - **App behavior differs.** Some apps return no data on success, some return `RESULT_CANCELED` with a response, and some reject certain characters in `tr` or `tn`. Plain letters and digits in `transactionRef` are the safest choice.
 - **Merchant restrictions.** Many UPI apps refuse or limit intent payments to merchant VPAs that are not set up through a PSP. That is decided by the app and the bank, not by this library.
+- **UPI apps only accept payment links after registration.** BHIM, PhonePe, Google Pay and others ship their `upi://pay` handler disabled (`android:enabled="false"` in their manifests) and turn it on once the user has registered with a phone number and a bank account. A freshly installed app that has not been set up is invisible to `getInstalledUpiApps()`, and `pay()` resolves with `unavailable`. To test payments, use a device with a SIM and at least one registered UPI app.
 - **One payment at a time.** A second `pay()` while one is waiting rejects with `IN_PROGRESS`.
 - **Process death.** If Android kills your app while the UPI app is open, the JavaScript promise is gone. Check the payment status on your server when the app starts.
 
