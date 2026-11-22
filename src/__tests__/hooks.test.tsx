@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { NativeModules, Platform, Text } from 'react-native';
 import { act, render, screen } from '@testing-library/react-native';
+import { getLastResult, resetLastResult } from '../api';
 import { useUpiPayment } from '../hooks';
 import { resetNativeModuleCache } from '../native';
 import type { UseUpiPaymentResult } from '../hooks';
@@ -39,6 +40,7 @@ afterEach(() => {
   Object.defineProperty(Platform, 'OS', { configurable: true, get: () => originalOS });
   settle = null;
   fail = null;
+  resetLastResult();
 });
 
 let api: UseUpiPaymentResult | undefined;
@@ -118,4 +120,96 @@ it('records validation errors', async () => {
   expect(result).toBeNull();
   expect(screen.getByText('error:INVALID_PARAMS')).toBeTruthy();
   expect(api!.error!.problems[0]).toMatchObject({ field: 'payeeVpa', code: 'INVALID_VPA' });
+});
+
+// Finding 2 (0.1.1): a second tap while the UPI app is open must not flip the
+// hook to `error` and re-enable a button that is disabled while `launching`.
+it('ignores a second pay while one is in flight and keeps the state', async () => {
+  await render(<Probe />);
+  const { promise } = await start();
+  expect(screen.getByText('launching:-')).toBeTruthy();
+
+  let second: unknown = 'not settled';
+  await act(async () => {
+    second = await api!.pay(params);
+  });
+  expect(second).toBeNull();
+  expect(screen.getByText('launching:-')).toBeTruthy();
+  expect(NativeModules.UpiCheckout.pay).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    settle!({ outcome: 'result', resultCode: -1, response: 'Status=SUCCESS' });
+    await promise;
+  });
+  expect(screen.getByText('completed:completed')).toBeTruthy();
+});
+
+it('ignores a pay while another hook has a payment in flight', async () => {
+  let other: UseUpiPaymentResult | undefined;
+  function Other() {
+    other = useUpiPayment();
+    return <Text>{`other:${other.status}`}</Text>;
+  }
+  await render(
+    <>
+      <Probe />
+      <Other />
+    </>,
+  );
+  const { promise } = await start();
+  await act(async () => {
+    await other!.pay(params);
+  });
+  expect(screen.getByText('other:idle')).toBeTruthy();
+  expect(screen.getByText('launching:-')).toBeTruthy();
+  await act(async () => {
+    settle!({ outcome: 'result', resultCode: 0, response: null });
+    await promise;
+  });
+});
+
+// Finding 6 (0.1.1): reset() ends the hook's interest in the running call.
+it('keeps the state after reset() when the earlier call settles late', async () => {
+  await render(<Probe />);
+  const { promise } = await start();
+  await act(async () => api!.reset());
+  expect(screen.getByText('idle:-')).toBeTruthy();
+
+  await act(async () => {
+    settle!({ outcome: 'result', resultCode: -1, response: 'Status=SUCCESS' });
+    await promise;
+  });
+  expect(screen.getByText('idle:-')).toBeTruthy();
+  await expect(promise).resolves.toMatchObject({ kind: 'completed' });
+  await expect(getLastResult()).resolves.toMatchObject({ result: { kind: 'completed' }, transactionRef: 'ORDER42' });
+});
+
+it('keeps the state after reset() when the earlier call rejects late', async () => {
+  await render(<Probe />);
+  const { promise } = await start();
+  await act(async () => api!.reset());
+  await act(async () => {
+    fail!(Object.assign(new Error('gone'), { code: 'ACTIVITY_UNAVAILABLE' }));
+    await promise;
+  });
+  expect(screen.getByText('idle:-')).toBeTruthy();
+});
+
+// Finding 4 (0.1.1): the screen that started the payment unmounts (activity
+// destroyed); the remounted screen recovers the result with getLastResult().
+it('lets a remounted screen recover a result that settled while unmounted', async () => {
+  const view = await render(<Probe />);
+  const { promise } = await start();
+  await act(async () => view.unmount());
+  await act(async () => {
+    settle!({ outcome: 'result', resultCode: -1, response: 'Status=SUCCESS&txnRef=ORDER42' });
+    await promise;
+  });
+
+  await render(<Probe />);
+  expect(screen.getByText('idle:-')).toBeTruthy();
+  await expect(getLastResult()).resolves.toMatchObject({
+    result: { kind: 'completed', response: { status: 'success' } },
+    transactionRef: 'ORDER42',
+  });
 });

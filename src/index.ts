@@ -1,4 +1,4 @@
-export { getInstalledUpiApps, isUpiAvailable, pay } from './api';
+export { getInstalledUpiApps, getLastResult, isUpiAvailable, pay } from './api';
 export { GENERIC_UPI_SCHEME, IOS_QUERY_SCHEMES, KNOWN_UPI_APPS } from './apps';
 export type { KnownUpiApp } from './apps';
 export { UpiError } from './errors';
@@ -11,6 +11,7 @@ export type {
   UpiApp,
   UpiCurrency,
   UpiErrorCode,
+  UpiLastResult,
   UpiLimits,
   UpiParamField,
   UpiPayOptions,

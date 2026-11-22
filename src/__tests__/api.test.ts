@@ -1,11 +1,13 @@
 import { NativeModules, Platform } from 'react-native';
-import { getInstalledUpiApps, isUpiAvailable, pay, UpiError } from '../index';
+import { getInstalledUpiApps, getLastResult, isUpiAvailable, pay, UpiError } from '../index';
 import type { UpiPaymentParams } from '../index';
+import { resetLastResult } from '../api';
 import { resetNativeModuleCache } from '../native';
 
 interface FakeModule {
   getInstalledApps: jest.Mock;
   pay: jest.Mock;
+  getLastResult?: jest.Mock;
 }
 
 const params: UpiPaymentParams = {
@@ -48,6 +50,8 @@ const originalOS = Platform.OS;
 afterEach(() => {
   delete (NativeModules as { UpiCheckout?: unknown }).UpiCheckout;
   resetNativeModuleCache();
+  resetLastResult();
+  jest.restoreAllMocks();
   setPlatform(originalOS as 'ios' | 'android');
 });
 
@@ -93,13 +97,55 @@ describe('on Android', () => {
   });
 
   it.each([
-    [{ outcome: 'result', resultCode: 0, response: null }, 0],
+    { outcome: 'result', resultCode: 0, response: null },
+    { outcome: 'result', resultCode: 0, response: '' },
+    { outcome: 'result', resultCode: 0 },
+  ])('resolves cancelled for RESULT_CANCELED without data (%j)', async (nativeResult) => {
+    installFake({ pay: jest.fn(async () => nativeResult) });
+    await expect(pay(params)).resolves.toEqual({ kind: 'cancelled', resultCode: 0 });
+  });
+
+  // Finding 1 (0.1.1): some apps return RESULT_OK and no data after a
+  // successful payment. Reporting that as `cancelled` invites a second payment.
+  it.each([
+    [{ outcome: 'result', resultCode: -1, response: null }, -1],
     [{ outcome: 'result', resultCode: -1, response: '' }, -1],
     [{ outcome: 'result', resultCode: -1, response: '   ' }, -1],
-    [{ outcome: 'result', resultCode: 0 }, 0],
-  ])('resolves cancelled when no data came back (%j)', async (nativeResult, resultCode) => {
+    [{ outcome: 'result', resultCode: -1 }, -1],
+    [{ outcome: 'result', resultCode: 1, response: null }, 1],
+  ])('resolves completed with status unknown for any other result code without data (%j)', async (nativeResult, resultCode) => {
     installFake({ pay: jest.fn(async () => nativeResult) });
-    await expect(pay(params)).resolves.toEqual({ kind: 'cancelled', resultCode });
+    await expect(pay(params)).resolves.toEqual({
+      kind: 'completed',
+      resultCode,
+      response: { status: 'unknown', raw: '' },
+    });
+  });
+
+  // Finding 3 (0.1.1): native settles a request that never got a result
+  // with `resultCode: null`. Nothing says the user backed out.
+  it.each([
+    { outcome: 'result', resultCode: null, response: null },
+    { outcome: 'result', response: null },
+  ])('resolves completed with status unknown when no result code came back (%j)', async (nativeResult) => {
+    installFake({ pay: jest.fn(async () => nativeResult) });
+    await expect(pay(params)).resolves.toEqual({
+      kind: 'completed',
+      resultCode: null,
+      response: { status: 'unknown', raw: '' },
+    });
+  });
+
+  // Finding 10 (0.1.1): the text "null" is not a response.
+  it.each(['null', 'NULL', 'undefined', ' null ', ' \n\t '])('treats the response %j as no data', async (response) => {
+    installFake({ pay: jest.fn(async () => ({ outcome: 'result', resultCode: 0, response })) });
+    await expect(pay(params)).resolves.toEqual({ kind: 'cancelled', resultCode: 0 });
+    installFake({ pay: jest.fn(async () => ({ outcome: 'result', resultCode: -1, response })) });
+    await expect(pay(params)).resolves.toEqual({
+      kind: 'completed',
+      resultCode: -1,
+      response: { status: 'unknown', raw: '' },
+    });
   });
 
   it('resolves a pending status as completed with status submitted', async () => {
@@ -238,5 +284,101 @@ describe('on iOS', () => {
     await expect(isUpiAvailable()).resolves.toBe(true);
     const candidates = fake.getInstalledApps.mock.calls[0][0] as Array<{ id: string; url: string }>;
     expect(candidates[candidates.length - 1]).toEqual({ id: 'upi', name: 'UPI', url: 'upi://pay' });
+  });
+});
+
+// Finding 4 (0.1.1): a screen that was unmounted while the UPI app was open
+// (for example after "Don't keep activities") can read the result back.
+describe('getLastResult', () => {
+  beforeEach(() => setPlatform('android'));
+
+  it('is null before any payment settles', async () => {
+    installFake();
+    await expect(getLastResult()).resolves.toBeNull();
+  });
+
+  it('returns the most recent result with its transactionRef and time', async () => {
+    installFake();
+    jest.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+    await pay(params);
+    await expect(getLastResult()).resolves.toEqual({
+      result: {
+        kind: 'completed',
+        resultCode: -1,
+        response: { status: 'success', transactionId: 'T1', raw: 'Status=SUCCESS&txnId=T1' },
+      },
+      transactionRef: 'ORDER42',
+      time: 1_700_000_000_000,
+    });
+
+    installFake({ pay: jest.fn(async () => ({ outcome: 'unavailable' })) });
+    await pay({ ...params, transactionRef: 'ORDER43' });
+    await expect(getLastResult()).resolves.toMatchObject({ result: { kind: 'unavailable' }, transactionRef: 'ORDER43' });
+  });
+
+  it('does not record rejections', async () => {
+    installFake({
+      pay: jest.fn(async () => {
+        throw Object.assign(new Error('No activity'), { code: 'ACTIVITY_UNAVAILABLE' });
+      }),
+    });
+    await expect(pay(params)).rejects.toMatchObject({ code: 'ACTIVITY_UNAVAILABLE' });
+    await expect(getLastResult()).resolves.toBeNull();
+  });
+
+  it('prefers a newer native record, for example one that arrived after a JavaScript reload', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(1000);
+    installFake({
+      getLastResult: jest.fn(async () => ({
+        outcome: 'result',
+        resultCode: -1,
+        response: 'Status=SUCCESS&txnRef=ORDER9',
+        transactionRef: 'ORDER9',
+        time: 5000,
+      })),
+    });
+    await pay(params);
+    await expect(getLastResult()).resolves.toEqual({
+      result: {
+        kind: 'completed',
+        resultCode: -1,
+        response: { status: 'success', transactionRef: 'ORDER9', raw: 'Status=SUCCESS&txnRef=ORDER9' },
+      },
+      transactionRef: 'ORDER9',
+      time: 5000,
+    });
+  });
+
+  it('keeps the JavaScript record when the native one is older, missing or malformed', async () => {
+    jest.spyOn(Date, 'now').mockReturnValue(9000);
+    const fake = installFake({
+      getLastResult: jest.fn(async () => ({ outcome: 'result', resultCode: 0, transactionRef: 'OLD', time: 10 })),
+    });
+    await pay(params);
+    await expect(getLastResult()).resolves.toMatchObject({ transactionRef: 'ORDER42', time: 9000 });
+
+    fake.getLastResult!.mockImplementation(async () => ({ outcome: 'surprise', time: 99999 }));
+    await expect(getLastResult()).resolves.toMatchObject({ transactionRef: 'ORDER42' });
+
+    fake.getLastResult!.mockImplementation(async () => {
+      throw new Error('boom');
+    });
+    await expect(getLastResult()).resolves.toMatchObject({ transactionRef: 'ORDER42' });
+
+    delete fake.getLastResult;
+    await expect(getLastResult()).resolves.toMatchObject({ transactionRef: 'ORDER42' });
+  });
+
+  it('maps a native record without transactionRef to null', async () => {
+    installFake({ getLastResult: jest.fn(async () => ({ outcome: 'result', resultCode: 0, response: null, time: 3 })) });
+    await expect(getLastResult()).resolves.toEqual({
+      result: { kind: 'cancelled', resultCode: 0 },
+      transactionRef: null,
+      time: 3,
+    });
+  });
+
+  it('resolves null without the native module', async () => {
+    await expect(getLastResult()).resolves.toBeNull();
   });
 });

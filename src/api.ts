@@ -4,7 +4,7 @@ import { UpiError, toUpiError } from './errors';
 import { getNativeModule } from './native';
 import { parseUpiResponse } from './response';
 import { buildUpiUrl } from './url';
-import type { UpiApp, UpiPayOptions, UpiPayResult, UpiPaymentParams } from './types';
+import type { UpiApp, UpiLastResult, UpiPayOptions, UpiPayResult, UpiPaymentParams } from './types';
 
 type Candidate = { id: string; name: string; url: string };
 
@@ -72,13 +72,32 @@ export async function isUpiAvailable(): Promise<boolean> {
   return (await queryApps(candidates)).length > 0;
 }
 
+/** Android's `Activity.RESULT_CANCELED`. */
+const RESULT_CANCELED = 0;
+
+// Some apps send the text "null" or "undefined" instead of leaving the
+// response out. Neither is a response.
+function hasResponseText(response: string): boolean {
+  const trimmed = response.trim().toLowerCase();
+  return trimmed.length > 0 && trimmed !== 'null' && trimmed !== 'undefined';
+}
+
+/**
+ * Map the native result. A missing response only means "cancelled" when
+ * Android also reported `RESULT_CANCELED`. Some apps finish with `RESULT_OK`
+ * and no data after a successful payment, and the native side reports a
+ * request that never got any result with `resultCode: null`. Both become
+ * `completed` with `status: 'unknown'`, so the app checks its server instead
+ * of telling a user who may have paid that they cancelled.
+ */
 function readResult(raw: unknown): UpiPayResult {
   if (isRecord(raw)) {
     if (raw.outcome === 'result') {
-      const resultCode = typeof raw.resultCode === 'number' ? raw.resultCode : 0;
-      const response = typeof raw.response === 'string' ? raw.response : '';
-      if (response.trim().length === 0) return { kind: 'cancelled', resultCode };
-      return { kind: 'completed', response: parseUpiResponse(response), resultCode };
+      const resultCode = typeof raw.resultCode === 'number' ? raw.resultCode : null;
+      const response = typeof raw.response === 'string' && hasResponseText(raw.response) ? raw.response : '';
+      if (response.length > 0) return { kind: 'completed', response: parseUpiResponse(response), resultCode };
+      if (resultCode === RESULT_CANCELED) return { kind: 'cancelled', resultCode };
+      return { kind: 'completed', response: { status: 'unknown', raw: '' }, resultCode };
     }
     if (raw.outcome === 'launched') return { kind: 'launched' };
     if (raw.outcome === 'unavailable') return { kind: 'unavailable' };
@@ -86,14 +105,83 @@ function readResult(raw: unknown): UpiPayResult {
   throw new UpiError('UNKNOWN', 'The native module returned an unexpected result.');
 }
 
+let lastResult: UpiLastResult | null = null;
+
+function remember(result: UpiPayResult, transactionRef: string | null): void {
+  lastResult = { result, transactionRef, time: Date.now() };
+}
+
+function readNativeLastResult(raw: unknown): UpiLastResult | null {
+  if (!isRecord(raw) || typeof raw.time !== 'number' || !isFinite(raw.time)) return null;
+  try {
+    return {
+      result: readResult(raw),
+      transactionRef: typeof raw.transactionRef === 'string' ? raw.transactionRef : null,
+      time: raw.time,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The most recent payment result, or `null` when none has settled since the
+ * app started.
+ *
+ * Use it when the screen that called `pay()` may have been unmounted while
+ * the UPI app was open, for example when Android destroyed the activity
+ * ("Don't keep activities", low memory). The promise still settles, but the
+ * unmounted component never sees it. A screen that mounts again can call
+ * `getLastResult()`, compare `transactionRef` with the order it shows, and
+ * then ask the server.
+ *
+ * JavaScript keeps every result `pay()` resolved with. On Android the native
+ * module also keeps the last result the UPI app sent, even when no
+ * JavaScript promise was waiting for it any more (for example after a
+ * JavaScript reload). The newer of the two is returned. Rejections are not
+ * recorded. Nothing survives the app process being killed. `time` is
+ * milliseconds since the epoch, taken when the result was recorded.
+ *
+ * Like every result, this is a CLIENT-SIDE CLAIM. Confirm on your server.
+ */
+export async function getLastResult(): Promise<UpiLastResult | null> {
+  const fromJs = lastResult;
+  const nativeModule = getNativeModule();
+  let fromNative: UpiLastResult | null = null;
+  if (nativeModule && typeof nativeModule.getLastResult === 'function') {
+    try {
+      fromNative = readNativeLastResult(await nativeModule.getLastResult());
+    } catch {
+      fromNative = null;
+    }
+  }
+  if (fromNative && (!fromJs || fromNative.time > fromJs.time)) return fromNative;
+  return fromJs;
+}
+
+/** Test hook: forget the last result kept in JavaScript. */
+export function resetLastResult(): void {
+  lastResult = null;
+}
+
 let inFlight = false;
+
+/** Whether a `pay()` call is waiting to settle. Used by the hook. */
+export function isPaymentInFlight(): boolean {
+  return inFlight;
+}
 
 /**
  * Start a UPI payment.
  *
  * Android opens the system chooser (titled `chooserTitle`), or the app named
  * by `packageName`, and resolves when the user returns: `completed` with the
- * parsed response, or `cancelled` when no response came back.
+ * parsed response, or `cancelled` when Android reported `RESULT_CANCELED`
+ * and no response came back. A result without a response but with any other
+ * result code (some apps send `RESULT_OK` and no data after a successful
+ * payment) is `completed` with `response.status: 'unknown'`: ask your server.
+ * Android only starts the UPI app while your activity is in the foreground;
+ * otherwise `pay()` rejects with `ACTIVITY_UNAVAILABLE`.
  *
  * iOS opens the app named by `iosApp`, or the generic `upi://pay` URL, and
  * resolves with `launched` at once: iOS apps cannot return a result.
@@ -106,7 +194,8 @@ let inFlight = false;
  * makes no network calls.
  *
  * Rejects with a `UpiError`. Only one payment can be in flight; a second call
- * made before the first settles rejects with `IN_PROGRESS`.
+ * made before the first settles rejects with `IN_PROGRESS`. The last result
+ * is kept for `getLastResult()`.
  */
 export async function pay(params: UpiPaymentParams, options: UpiPayOptions = {}): Promise<UpiPayResult> {
   if (inFlight) {
@@ -144,7 +233,9 @@ export async function pay(params: UpiPaymentParams, options: UpiPayOptions = {})
     } catch (error) {
       throw toUpiError(error);
     }
-    return readResult(raw);
+    const result = readResult(raw);
+    remember(result, typeof params.transactionRef === 'string' ? params.transactionRef : null);
+    return result;
   } finally {
     inFlight = false;
   }

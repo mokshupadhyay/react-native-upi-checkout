@@ -4,7 +4,7 @@ type ResponseField = 'status' | 'transactionId' | 'transactionRef' | 'responseCo
 
 // Keys are compared after lower-casing and dropping everything but letters
 // and digits, so `ApprovalRefNo`, `approvalRefNo` and `approval_ref_no` match.
-const KEY_ALIASES: { [normalizedKey: string]: ResponseField } = {
+export const KEY_ALIASES: { [normalizedKey: string]: ResponseField } = {
   status: 'status',
   txnstatus: 'status',
   txnid: 'transactionId',
@@ -36,12 +36,17 @@ function normalizeKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
 
+// Responses are form-encoded (`application/x-www-form-urlencoded`): `+` is a
+// space and `%2B` is a plus sign. Android's own encoders produce this, and
+// so does the native side of this library when it joins separate extras
+// (it writes spaces as `%20`, which decodes the same way).
 function decode(value: string): string {
-  if (value.indexOf('%') === -1) return value;
+  const spaced = value.replace(/\+/g, ' ');
+  if (spaced.indexOf('%') === -1) return spaced;
   try {
-    return decodeURIComponent(value);
+    return decodeURIComponent(spaced);
   } catch {
-    return value;
+    return spaced;
   }
 }
 
@@ -57,7 +62,8 @@ function isEmptyValue(value: string): boolean {
  * `txnId=AXI123&responseCode=00&Status=SUCCESS&txnRef=ORDER42`.
  *
  * Keys are matched without regard to case or order. The first non-empty value
- * of a key wins. `SUCCESS`, `FAILURE`/`FAILED` and `SUBMITTED`/`PENDING` are
+ * of a key wins. Keys and values are form-decoded: `+` becomes a space and
+ * `%2B` a plus sign. `SUCCESS`, `FAILURE`/`FAILED` and `SUBMITTED`/`PENDING` are
  * recognized in any case; anything else, and any malformed input, gives
  * `status: 'unknown'`. Never throws.
  *

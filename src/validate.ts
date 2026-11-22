@@ -17,15 +17,29 @@ export const DEFAULT_UPI_LIMITS: Readonly<UpiLimits> = Object.freeze({
   payeeName: 50,
   transactionRef: 35,
   note: 50,
+  transactionId: 35,
+  url: 255,
 });
 
 // Integer part capped at 13 digits so the amount in paise stays a safe
 // integer. This is an arithmetic limit of this library, not a UPI rule.
 const AMOUNT_PATTERN = /^(\d{1,13})(?:\.(\d{1,2}))?$/;
 
-// Shape check only: `name@handle` with no spaces. It cannot tell whether the
-// address exists or which handles a bank actually issues.
-const VPA_PATTERN = /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+$/;
+// Shape check only: `handle@provider`. The handle starts with a letter or
+// digit and then has letters, digits, `.`, `_` and `-`, with no two dots in a
+// row. The provider (the part after `@`, such as `okaxis` or `ybl`) is
+// letters and digits only. This accepts every common real shape (phone
+// numbers, `name.surname`, `gpay-1234567890`, `paytmqr...`) and rejects
+// strings such as `-@-`, `.@b`, `a@b..` and `a..b@okaxis`. It cannot tell
+// whether the address exists.
+const VPA_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]|\.(?!\.))*@[A-Za-z0-9]+$/;
+
+// C0 controls, DEL and C1 controls. These include tab, CR and LF.
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;
+
+// An absolute http(s) URL with a non-empty host and no whitespace. Other
+// schemes (`javascript:`, `intent:`, `upi:`, `data:`) are rejected.
+const URL_PATTERN = /^https?:\/\/[^\s/?#@]+(?:[/?#]\S*)?$/i;
 
 const MERCHANT_CODE_PATTERN = /^\d{4}$/;
 
@@ -82,10 +96,13 @@ function isEncodable(value: string): boolean {
  * Check payment parameters and return every problem found. Never throws; an
  * empty list means `buildUpiUrl` will accept the parameters.
  *
- * Checks: required fields, value types, `payeeVpa` shape (`name@handle`),
+ * Checks: required fields, value types, `payeeVpa` shape (`handle@provider`),
  * `amount` (positive, at most two decimals), `currency` (`'INR'` only),
- * `merchantCode` (four digits), and the length limits in `DEFAULT_UPI_LIMITS`,
- * which are conservative defaults you can override.
+ * `merchantCode` (four digits), `url` (`https:` or `http:` only), no control
+ * characters and no leading or trailing whitespace in any text field, and
+ * the length limits in `DEFAULT_UPI_LIMITS`, which are conservative defaults
+ * you can override. `undefined`, `null` and `''` all mean "absent"; a blank
+ * optional value is left out of the URL.
  */
 export function validateUpiParams(params: UpiPaymentParams, options: UpiValidationOptions = {}): UpiProblem[] {
   const problems: UpiProblem[] = [];
@@ -109,8 +126,17 @@ export function validateUpiParams(params: UpiPaymentParams, options: UpiValidati
       add('INVALID_TYPE', field, `${field} must be a string.`);
       return null;
     }
-    if (required && value.trim().length === 0) {
-      add('REQUIRED', field, `${field} must not be blank.`);
+    if (value.trim().length === 0) {
+      // Blank optional values are left out of the URL, like empty ones.
+      if (required) add('REQUIRED', field, `${field} must not be blank.`);
+      return null;
+    }
+    if (CONTROL_CHARACTERS.test(value)) {
+      add('INVALID_CHARACTERS', field, `${field} must not contain control characters such as tabs or line breaks.`);
+      return null;
+    }
+    if (value.trim() !== value) {
+      add('SURROUNDING_WHITESPACE', field, `${field} must not start or end with whitespace.`);
       return null;
     }
     if (!isEncodable(value)) {
@@ -141,7 +167,7 @@ export function validateUpiParams(params: UpiPaymentParams, options: UpiValidati
   }
 
   const currency = input.currency;
-  if (currency !== undefined && currency !== 'INR') {
+  if (currency !== undefined && currency !== null && currency !== 'INR') {
     add('INVALID_CURRENCY', 'currency', 'currency must be "INR".');
   }
 
@@ -152,8 +178,11 @@ export function validateUpiParams(params: UpiPaymentParams, options: UpiValidati
   if (merchantCode !== null && !MERCHANT_CODE_PATTERN.test(merchantCode)) {
     add('INVALID_MERCHANT_CODE', 'merchantCode', 'merchantCode must be a four-digit merchant category code.');
   }
-  text('transactionId', false);
-  text('url', false);
+  text('transactionId', false, limits.transactionId);
+  const url = text('url', false, limits.url);
+  if (url !== null && !URL_PATTERN.test(url)) {
+    add('INVALID_URL', 'url', 'url must be an absolute https: or http: URL.');
+  }
 
   return problems;
 }

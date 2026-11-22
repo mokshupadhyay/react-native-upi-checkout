@@ -61,7 +61,6 @@ describe('buildUpiUrl', () => {
     ['#1 shop', '%231%20shop'],
     ['Café Ünïcode', 'Caf%C3%A9%20%C3%9Cn%C3%AFcode'],
     ['रवि स्टोर', '%E0%A4%B0%E0%A4%B5%E0%A4%BF%20%E0%A4%B8%E0%A5%8D%E0%A4%9F%E0%A5%8B%E0%A4%B0'],
-    ['line\nbreak', 'line%0Abreak'],
     ['$&$1', '%24%26%241'],
     ['mail me@home', 'mail%20me@home'],
   ])('encodes %j in a value', (payeeName, encoded) => {
@@ -71,7 +70,7 @@ describe('buildUpiUrl', () => {
   });
 
   it('keeps @ readable in the payee address', () => {
-    expect(buildUpiUrl({ ...base, payeeVpa: 'first.last-1_x@ok.bank' })).toContain('pa=first.last-1_x@ok.bank&');
+    expect(buildUpiUrl({ ...base, payeeVpa: 'first.last-1_x@okbank' })).toContain('pa=first.last-1_x@okbank&');
   });
 
   it.each<[string | number, string]>([
@@ -89,6 +88,19 @@ describe('buildUpiUrl', () => {
     [0.07, '0.07'],
   ])('formats amount %j as am=%s', (amount, expected) => {
     expect(buildUpiUrl({ ...base, amount })).toContain(`&am=${expected}&`);
+  });
+
+  // Finding 14 (0.1.1): 0.1.0 sent `tr=%20R1%20` and `pn=line%0Abreak`.
+  it.each([
+    { transactionRef: ' R1 ' },
+    { payeeName: 'line\nbreak' },
+  ])('refuses to build a URL with surrounding whitespace or control characters (%j)', (extra) => {
+    expect(() => buildUpiUrl({ ...base, ...extra })).toThrow(UpiError);
+  });
+
+  // Finding 11 (0.1.1).
+  it('treats a null currency as the default INR', () => {
+    expect(buildUpiUrl({ ...base, currency: null } as unknown as UpiPaymentParams)).toBe(buildUpiUrl(base));
   });
 
   it('throws INVALID_PARAMS with the problems', () => {

@@ -1,6 +1,6 @@
 {
   "name": "react-native-upi-checkout",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Start a UPI payment from a React Native app in India and read the result the UPI app returns. Typed URL building, validation and response parsing, installed UPI app detection, and one API on the old and the New Architecture.",
   "main": "lib/commonjs/index.js",
   "module": "lib/module/index.js",

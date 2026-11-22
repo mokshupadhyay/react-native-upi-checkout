@@ -6,7 +6,7 @@ Start a UPI payment from a React Native app in India and read the result the UPI
 - **Validation that never throws.** `validateUpiParams()` returns a list of `{ code, field, message }` problems you can show next to a form field.
 - **Response parsing that tolerates real apps.** `parseUpiResponse()` reads `Status`, `status`, `txnId`, `txnRef`, `responseCode`, `ApprovalRefNo` and friends in any case and order, and returns `unknown` for anything it cannot read.
 - **App detection.** `getInstalledUpiApps()` lists the apps that can pay: every handler of `upi://pay` on Android, and the known apps on iOS.
-- **A typed result.** `pay()` resolves to `completed`, `cancelled`, `launched` or `unavailable`, and rejects with a `UpiError` that has a stable `code`. Only one payment can be in flight.
+- **A typed result.** `pay()` resolves to `completed`, `cancelled`, `launched` or `unavailable`, and rejects with a `UpiError` that has a stable `code`. Only one payment can be in flight. `getLastResult()` returns the most recent result to a screen that was unmounted while the UPI app was open.
 - **No network calls, no secrets.** The library never sees credentials, PINs or card data. The PIN is entered inside the UPI app.
 
 > [!WARNING]
@@ -28,7 +28,7 @@ The Android side picks the source set from your app's `newArchEnabled` Gradle pr
 
 You need a development build or a bare app. Expo Go cannot load the native module: there `getInstalledUpiApps()` resolves to `[]`, `isUpiAvailable()` to `false`, and `pay()` rejects with `NOT_LINKED`.
 
-**Status of version 0.1.0:** the JavaScript is covered by unit tests, and the Android Java has been compiled for both architectures. Nothing has been run on a device yet. [docs/DEVICE_TESTING.md](docs/DEVICE_TESTING.md) lists the checks still to do. Please [report issues](https://github.com/mokshupadhyay/react-native-upi-checkout/issues) with the app name and version when a UPI app behaves differently.
+**Status of version 0.1.1:** the JavaScript is covered by unit tests. The Android Java has been compiled for both architectures against React Native 0.88.0, and the old architecture also against 0.60.6, 0.64.4 and 0.65.3. The request state and the parsing of result extras have plain-JVM tests. Nothing has been run on a device yet. [docs/DEVICE_TESTING.md](docs/DEVICE_TESTING.md) lists the checks still to do. Please [report issues](https://github.com/mokshupadhyay/react-native-upi-checkout/issues) with the app name and version when a UPI app behaves differently.
 
 ## Setup
 
@@ -89,8 +89,11 @@ async function checkout(order: { id: string; total: string }) {
       case 'completed': // Android: result.response.status is 'success' | 'failure' | 'submitted' | 'unknown'
       case 'launched': // iOS: the UPI app was opened; no result can be read
         // Either way, ask your server. Only the server knows whether the money arrived.
+        // 'unknown' (for example RESULT_OK with no data) does NOT mean "not paid".
         return await api.confirmPayment(order.id);
       case 'cancelled':
+        // Android reported RESULT_CANCELED with no data. Some apps do this after
+        // a payment too, so a server check before offering "pay again" is safest.
         return showMessage('Payment cancelled');
       case 'unavailable':
         return showMessage('No UPI app found');
@@ -136,7 +139,26 @@ function PayButton({ params }) {
 }
 ```
 
-`status` is `idle`, `launching`, `completed` (a `completed` or `launched` result), `cancelled`, or `error` (a rejection, or an `unavailable` result with `error.code` set to `NO_UPI_APP`). The hook's `pay` never rejects; it resolves to the result or to `null`, and `reset()` returns to `idle`.
+`status` is `idle`, `launching`, `completed` (a `completed` or `launched` result), `cancelled`, or `error` (a rejection, or an `unavailable` result with `error.code` set to `NO_UPI_APP`). The hook's `pay` never rejects; it resolves to the result or to `null`.
+
+- **Double tap:** while a payment is in flight (from this hook or anywhere else in the app), the hook's `pay` resolves to `null` at once and leaves `status`, `result` and `error` unchanged. The button above stays disabled.
+- **`reset()`** returns to `idle` and ends the hook's interest in a payment that is still in flight: its late result does not change the state. The result is still kept for `getLastResult()`, and a new `pay()` is ignored until the earlier one settles.
+
+### Recover a result after the screen was unmounted
+
+When Android destroys your activity while the UPI app is open ("Don't keep activities", or low memory), React Native unmounts your screens. The `pay()` promise still settles when the user returns, but the unmounted component never sees it, and the hook in the new screen starts at `idle`. Read the result back when the screen mounts:
+
+```tsx
+import { getLastResult } from 'react-native-upi-checkout';
+
+useEffect(() => {
+  getLastResult().then((last) => {
+    if (last && last.transactionRef === order.id) checkPaymentOnServer(order.id);
+  });
+}, [order.id]);
+```
+
+`getLastResult()` resolves to `{ result, transactionRef, time }` for the most recent result, or `null`. On Android the native module also keeps the last result a UPI app sent when no JavaScript promise was waiting for it any more (for example after a JavaScript reload). Rejections are not recorded, and nothing survives the app process being killed, so the server check on startup is still needed.
 
 ## API
 
@@ -148,6 +170,7 @@ function PayButton({ params }) {
 | `getInstalledUpiApps()` | `UpiApp[]`: `{ name, packageName? , iosApp? }` |
 | `isUpiAvailable()` | `true` when any app can handle a payment. On iOS this includes the generic `upi` scheme. |
 | `pay(params, options?)` | `UpiPayResult`; see below. |
+| `getLastResult()` | `{ result, transactionRef, time }` for the most recent result, or `null`. |
 | `useUpiPayment()` | `{ pay, status, result, error, reset }` |
 | `KNOWN_UPI_APPS`, `IOS_QUERY_SCHEMES`, `DEFAULT_UPI_LIMITS` | The app table, the iOS scheme list and the default limits. |
 
@@ -155,17 +178,17 @@ function PayButton({ params }) {
 
 | Field | URL | Required | Notes |
 | --- | --- | --- | --- |
-| `payeeVpa` | `pa` | yes | Must look like `name@handle`. |
+| `payeeVpa` | `pa` | yes | Must look like `handle@provider`; see [Validation and limits](#validation-and-limits). |
 | `payeeName` | `pn` | yes | |
 | `amount` | `am` | yes | Decimal string or number, greater than zero, at most two decimals. Sent with exactly two decimals. |
-| `currency` | `cu` | no | Only `'INR'`, the default. |
+| `currency` | `cu` | no | Only `'INR'`, the default. `null` counts as absent. |
 | `transactionRef` | `tr` | yes | Your order or payment reference. Use it to match the payment on your server. |
 | `note` | `tn` | yes | |
 | `merchantCode` | `mc` | no | Four-digit merchant category code. |
 | `transactionId` | `tid` | no | Only if your PSP gives you one. |
-| `url` | `url` | no | A link with order details. |
+| `url` | `url` | no | A link with order details. Only absolute `https:` and `http:` URLs are accepted. |
 
-The URL always lists parameters in the order `pa`, `pn`, `mc`, `tid`, `tr`, `tn`, `am`, `cu`, `url`. Empty optional values are left out. Every value is percent-encoded with `encodeURIComponent`, except that `@` stays readable (RFC 3986 allows it in a query, and some apps fail to read `%40`).
+The URL always lists parameters in the order `pa`, `pn`, `mc`, `tid`, `tr`, `tn`, `am`, `cu`, `url`. Optional values that are `undefined`, `null`, empty or blank are left out. Every value is percent-encoded with `encodeURIComponent`, except that `@` stays readable (RFC 3986 allows it in a query, and some apps fail to read `%40`).
 
 ### `pay` options
 
@@ -180,12 +203,16 @@ The URL always lists parameters in the order `pa`, `pn`, `mc`, `tid`, `tr`, `tn`
 
 | `kind` | When | Platform |
 | --- | --- | --- |
-| `completed` | The UPI app returned a response: `{ response, resultCode }`. A response is treated as `completed` even if the app reported `RESULT_CANCELED` with it. | Android |
-| `cancelled` | No response came back (the user backed out, or the app returned no data): `{ resultCode }`. | Android |
+| `completed` | The UPI app finished: `{ response, resultCode }`. A response is treated as `completed` even if the app reported `RESULT_CANCELED` with it. Without a response, any result code other than `RESULT_CANCELED` (for example `RESULT_OK`, which some apps send with no data after a successful payment) is also `completed`, with `response.status: 'unknown'` and `response.raw: ''`. | Android |
+| `cancelled` | Android reported `RESULT_CANCELED` (`0`) and no response came back, for example when the user dismissed the chooser: `{ resultCode: 0 }`. | Android |
 | `launched` | The app was opened. iOS cannot return a result. | iOS |
 | `unavailable` | No app can handle the payment, or the requested `packageName` / `iosApp` is not installed. | both |
 
 A `completed` result with `response.status === 'submitted'` means the app reported `SUBMITTED` or `PENDING`: the bank has not decided yet. Keep checking with your server.
+
+`resultCode` is `null` when Android delivered no result at all. That happens when the activity that started the payment comes back to the foreground and no result arrives within 1.5 seconds (Android normally delivers a result before the activity resumes). The request is then settled as `completed` with `status: 'unknown'` instead of hanging, because the library cannot tell whether the user paid. If the real result still turns up later, it is kept for `getLastResult()`.
+
+**Never conclude "not paid" from `unknown`, from a missing response, or from `cancelled` alone.** Ask your server.
 
 ### Errors
 
@@ -194,13 +221,13 @@ A `completed` result with `response.status === 'submitted'` means the app report
 - `INVALID_PARAMS`: the parameters or options failed validation.
 - `NO_UPI_APP`: Android found an app but could not start it (for example it was uninstalled in that moment). The common "nothing installed" case resolves with `unavailable` instead.
 - `IN_PROGRESS`: another `pay()` has not settled yet.
-- `ACTIVITY_UNAVAILABLE`: Android has no foreground activity to start from, or the activity or React instance that started the payment went away before a result came back. Check the status on your server.
+- `ACTIVITY_UNAVAILABLE`: Android has no resumed (foreground) activity to start from, for example when `pay()` is called while the app is in the background, or the activity or React instance that started the payment went away before a result came back. Check the status on your server.
 - `NOT_LINKED`: the native module is missing (Expo Go, web, or the app was not rebuilt).
 - `UNKNOWN`: anything else.
 
 ## Validation and limits
 
-`validateUpiParams` checks required fields, value types, the `name@handle` shape of `payeeVpa`, the amount, the currency, the merchant code, and these length limits, counted in characters:
+`validateUpiParams` checks required fields, value types, the shape of `payeeVpa`, the amount, the currency, the merchant code, the `url` scheme, the characters in every text field, and these length limits, counted in characters:
 
 | Field | Default |
 | --- | --- |
@@ -208,8 +235,17 @@ A `completed` result with `response.status === 'submitted'` means the app report
 | `payeeName` | 50 |
 | `transactionRef` | 35 |
 | `note` | 50 |
+| `transactionId` | 35 |
+| `url` | 255 |
 
-**These are conservative defaults, not rules quoted from the specification.** They are meant to keep requests short enough for common UPI apps. Override them with `{ limits: { note: 80 } }` when you know your values are accepted. The VPA check only looks at the shape; it cannot tell whether an address exists.
+**These are conservative defaults, not rules quoted from the specification.** They are meant to keep requests short enough for common UPI apps. Override them with `{ limits: { note: 80 } }` when you know your values are accepted.
+
+Other rules:
+
+- **`payeeVpa`** must be `handle@provider`. The handle starts with a letter or digit, then has letters, digits, `.`, `_` and `-`, with no two dots in a row. The provider (`okaxis`, `ybl`, `paytm`, ...) is letters and digits only. Phone numbers (`9876543210@ybl`), `first.last@okaxis`, `gpay-1234567890@okbizaxis` and `paytmqr...@paytm` are accepted; `-@-`, `.@b`, `a@b..` and `a..b@okaxis` are not. The check only looks at the shape; it cannot tell whether an address exists.
+- **Control characters** (U+0000 to U+001F and U+007F to U+009F, which includes tabs and line breaks) are rejected in every text field with `INVALID_CHARACTERS`.
+- **Leading or trailing whitespace** is rejected with `SURROUNDING_WHITESPACE`; nothing is trimmed for you. A trimmed `transactionRef` would no longer match the one your server stored, so the library leaves that decision to you. `amount` is the exception: `' 25 '` is accepted because it is sent as `25.00` anyway.
+- **`url`** must be an absolute `https:` or `http:` URL with a host (`INVALID_URL` otherwise), so `javascript:`, `intent:` and `data:` links are refused.
 
 The rules for UPI intent URLs are set by NPCI in the **UPI Linking Specifications**, published on [npci.org.in](https://www.npci.org.in/). Check the current version, and your PSP's documentation, for exact field limits, allowed characters, and whether you may use the intent flow for merchant payments without a PSP-signed request. This library does not sign requests.
 
@@ -222,9 +258,9 @@ parseUpiResponse('txnId=AXI123&responseCode=00&Status=SUCCESS&txnRef=ORDER42');
 // { status: 'success', transactionId: 'AXI123', responseCode: '00', transactionRef: 'ORDER42', raw: '...' }
 ```
 
-`pay()` already does this on Android. Keys are matched without regard to case, order or punctuation (`ApprovalRefNo`, `approvalRefNo`). Values `SUCCESS`, `FAILURE`/`FAILED` and `SUBMITTED`/`PENDING` are recognized in any case. Literal `null` values, which some apps send, are dropped. Anything else gives `status: 'unknown'`; `raw` always holds the original string, so log it when you report a misbehaving app.
+`pay()` already does this on Android. Keys are matched without regard to case, order or punctuation (`ApprovalRefNo`, `approvalRefNo`). Values `SUCCESS`, `FAILURE`/`FAILED` and `SUBMITTED`/`PENDING` are recognized in any case. Keys and values are form-decoded the way UPI apps encode them: `+` is a space and `%2B` is a plus sign, so `txnRef=ORDER+42` reads as `ORDER 42`. Literal `null` values, which some apps send, are dropped, and a whole response of `null`, `undefined` or only whitespace counts as no response. Anything else gives `status: 'unknown'`; `raw` always holds the original string, so log it when you report a misbehaving app.
 
-On Android, the native side reads the `response` extra. Apps that instead send `Status`, `txnId` and so on as separate extras are joined into the same `key=value&...` form.
+On Android, the native side reads the `response` extra (also `Response` or `RESPONSE`) first, on its own, so that another extra that fails to unparcel cannot hide it. Apps that instead send `Status`, `txnId`, `txnRef`, `responseCode`, `ApprovalRefNo` and so on as separate extras (any key the parser above knows) are joined into the same `key=value&...` form, keys sorted, each extra read separately.
 
 ## Known limits
 
@@ -234,7 +270,9 @@ On Android, the native side reads the `response` extra. Apps that instead send `
 - **Merchant restrictions.** Many UPI apps refuse or limit intent payments to merchant VPAs that are not set up through a PSP. That is decided by the app and the bank, not by this library.
 - **UPI apps only accept payment links after registration.** BHIM, PhonePe, Google Pay and others ship their `upi://pay` handler disabled (`android:enabled="false"` in their manifests) and turn it on once the user has registered with a phone number and a bank account. A freshly installed app that has not been set up is invisible to `getInstalledUpiApps()`, and `pay()` resolves with `unavailable`. To test payments, use a device with a SIM and at least one registered UPI app.
 - **One payment at a time.** A second `pay()` while one is waiting rejects with `IN_PROGRESS`.
-- **Process death.** If Android kills your app while the UPI app is open, the JavaScript promise is gone. Check the payment status on your server when the app starts.
+- **Foreground only.** Android refuses to start the UPI app unless your activity is resumed, and `pay()` rejects with `ACTIVITY_UNAVAILABLE`. A payment started from the background could be blocked by Android and never return a result.
+- **Activity destroyed.** With "Don't keep activities" or under memory pressure, your screens are unmounted while the UPI app is open. The promise still settles; use `getLastResult()` in the remounted screen. See [Recover a result](#recover-a-result-after-the-screen-was-unmounted).
+- **Process death.** If Android kills your app while the UPI app is open, the JavaScript promise and the kept last result are gone. Check the payment status on your server when the app starts.
 
 ## Development
 
@@ -244,4 +282,5 @@ npm run typecheck
 npm test
 npm run build
 sh scripts/android-compile-check.sh 0.88.0   # javac against android.jar and the cached react-android AAR
+sh scripts/android-jvm-test.sh               # plain-JVM tests of PaymentState and UpiResponseExtras
 ```

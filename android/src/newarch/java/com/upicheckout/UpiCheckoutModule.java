@@ -36,6 +36,11 @@ public class UpiCheckoutModule extends NativeUpiCheckoutSpec {
   }
 
   @Override
+  public void getLastResult(Promise promise) {
+    impl.getLastResult(promise);
+  }
+
+  @Override
   public void invalidate() {
     impl.invalidate();
     super.invalidate();

@@ -37,8 +37,25 @@ public class UpiCheckoutModule extends ReactContextBaseJavaModule {
     impl.pay(url, packageName, chooserTitle, promise);
   }
 
-  @Override
+  @ReactMethod
+  public void getLastResult(Promise promise) {
+    impl.getLastResult(promise);
+  }
+
+  /*
+   * Teardown. React Native 0.65 and later call invalidate(); 0.60 to 0.64
+   * call onCatalystInstanceDestroy(), and 0.60 to 0.63 have no invalidate()
+   * to override. Neither method is marked @Override so that this file
+   * compiles on the whole supported range. impl.invalidate() runs once even
+   * when a release calls both.
+   */
+
   public void invalidate() {
+    impl.invalidate();
+  }
+
+  @SuppressWarnings({"deprecation", "removal"}) // Deprecated in newer releases; the only teardown hook on 0.60-0.64.
+  public void onCatalystInstanceDestroy() {
     impl.invalidate();
   }
 }

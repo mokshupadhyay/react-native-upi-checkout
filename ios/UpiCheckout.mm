@@ -78,6 +78,15 @@ RCT_EXPORT_METHOD(pay
                            }];
 }
 
+// iOS gets no result back from the UPI app, so there is nothing to keep
+// natively. JavaScript keeps the `launched` / `unavailable` results itself.
+RCT_EXPORT_METHOD(getLastResult
+                  : (RCTPromiseResolveBlock)resolve reject
+                  : (RCTPromiseRejectBlock)reject)
+{
+  resolve([NSNull null]);
+}
+
 #ifdef RCT_NEW_ARCH_ENABLED
 - (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
     (const facebook::react::ObjCTurboModule::InitParams &)params

@@ -79,6 +79,23 @@ const cases: Array<[string, string, Expected]> = [
   ['value with an equals sign', 'Status=SUCCESS&txnId=a=b', { status: 'success', transactionId: 'a=b' }],
   ['prototype keys are ignored', 'constructor=x&__proto__=y&Status=constructor', { status: 'unknown' }],
   ['unrelated keys are ignored', 'bleTxId=1&Status=SUCCESS&foo=bar', { status: 'success' }],
+  // Finding 9 (0.1.1): responses are form-encoded, so `+` is a space and
+  // `%2B` is a plus sign.
+  ['form-encoded space in a value', 'txnRef=ORDER+42&Status=SUCCESS', { status: 'success', transactionRef: 'ORDER 42' }],
+  ['trailing form-encoded space in the status', 'Status=Success+&txnId=A1', { status: 'success', transactionId: 'A1' }],
+  ['percent-encoded plus stays a plus', 'txnId=T%2B1&Status=SUCCESS', { status: 'success', transactionId: 'T+1' }],
+  [
+    'plus and percent escapes together',
+    'Status=SUCCESS&txnRef=A+%2B+B%20C',
+    { status: 'success', transactionRef: 'A + B C' },
+  ],
+  ['form-encoded space in a key', 'Approval+Ref+No=99&Status=SUCCESS', { status: 'success', approvalRef: '99' }],
+  ['a lone plus is a blank value', 'Status=SUCCESS&txnId=+', { status: 'success' }],
+  [
+    'plus decoded even when an escape is malformed',
+    'Status=SUCCESS&txnId=50%ZZ+off',
+    { status: 'success', transactionId: '50%ZZ off' },
+  ],
 ];
 
 describe('parseUpiResponse', () => {

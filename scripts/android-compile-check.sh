@@ -7,6 +7,12 @@
 # does not prove it works on a device.
 #
 # Usage: sh scripts/android-compile-check.sh [react-native-version]
+#
+# For releases older than 0.71, which shipped the Android library inside the
+# npm package instead of Maven, point REACT_NATIVE_AAR at that file, for
+# example node_modules/react-native/android/com/facebook/react/react-native/0.64.4/react-native-0.64.4.aar
+# from an unpacked `npm pack react-native@0.64.4`. Releases before 0.68 have no
+# New Architecture, so only the old architecture is compiled for them.
 set -eu
 
 RN_VERSION="${1:-$(node -p "require('react-native/package.json').version")}"
@@ -24,8 +30,9 @@ ANDROID_JAR="$SDK/platforms/$PLATFORM/android.jar"
 [ -f "$ANDROID_JAR" ] || ANDROID_JAR="$(ls -d "$SDK"/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -n 1)"
 [ -f "$ANDROID_JAR" ] || fail "no android.jar under $SDK/platforms"
 
-AAR="$(find_one "com.facebook.react/react-android/$RN_VERSION" "react-android-$RN_VERSION-release.aar")"
-[ -n "$AAR" ] || fail "react-android $RN_VERSION is not in $CACHE; build any React Native $RN_VERSION app once"
+AAR="${REACT_NATIVE_AAR:-$(find_one "com.facebook.react/react-android/$RN_VERSION" "react-android-$RN_VERSION-release.aar")}"
+[ -n "$AAR" ] && [ -f "$AAR" ] || fail "react-android $RN_VERSION is not in $CACHE; build any React Native $RN_VERSION app once, or set REACT_NATIVE_AAR"
+RN_MINOR="$(echo "$RN_VERSION" | cut -d. -f2)"
 ANNOTATION="$(find_one androidx.annotation 'annotation-jvm-*.jar')"
 [ -n "$ANNOTATION" ] || ANNOTATION="$(find_one androidx.annotation 'annotation-1.*.jar')"
 JSR305="$(find_one com.google.code.findbugs 'jsr305-3*.jar')"
@@ -62,6 +69,11 @@ echo "react-android: $AAR"
 javac $JAVAC_FLAGS -cp "$CP" -d "$OUT/classes-oldarch" \
   android/src/main/java/com/upicheckout/*.java android/src/oldarch/java/com/upicheckout/*.java
 echo "old architecture: OK"
+
+if [ "$RN_MINOR" -lt 68 ] 2>/dev/null; then
+  echo "new architecture: skipped (React Native $RN_VERSION predates it)"
+  exit 0
+fi
 
 # shellcheck disable=SC2086
 javac $JAVAC_FLAGS -cp "$CP" -d "$OUT/classes-newarch" \
