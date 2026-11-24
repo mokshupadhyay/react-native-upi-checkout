@@ -284,3 +284,7 @@ npm run build
 sh scripts/android-compile-check.sh 0.88.0   # javac against android.jar and the cached react-android AAR
 sh scripts/android-jvm-test.sh               # plain-JVM tests of PaymentState and UpiResponseExtras
 ```
+
+## Author
+
+Built and maintained by [Moksh Upadhyay](https://mokshupadhyay.com).
